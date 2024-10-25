@@ -25,15 +25,23 @@ from botbuilder.core.streaming import (
     StreamingRequestHandler,
 )
 from botbuilder.schema import Activity
-from botbuilder.integration.aiohttp.streaming import AiohttpWebSocket
-from botframework.connector import AsyncBfPipeline, BotFrameworkConnectorConfiguration
-from botframework.connector.aio import ConnectorClient
+from botbuilder.integration.aiohttp.streaming import AiohttpWebSocket 
+from botframework.connector import (
+    AsyncBfPipeline,
+    BotFrameworkConnectorConfiguration,
+    ConnectorClient,
+)
 from botframework.connector.auth import (
     AuthenticateRequestResult,
     BotFrameworkAuthentication,
     BotFrameworkAuthenticationFactory,
     ConnectorFactory,
     MicrosoftAppCredentials,
+)
+from botframework.streaming import (
+    NamedPipeClient,
+    PayloadTypes,
+    StreamingRequest,
 )
 
 from .bot_framework_http_adapter_integration_base import (
@@ -138,6 +146,38 @@ class CloudAdapter(CloudAdapterBase, BotFrameworkHttpAdapterIntegrationBase):
         await streaming_activity_processor.listen()
 
 
+class _NamedPipeClient(NamedPipeClient):
+    def __init__(self, request_handler: StreamingRequestHandler) -> None:
+        super().__init__()
+        self._request_handler = request_handler
+
+    async def connect(self, server_name: str, pipe_name: str):
+        if not server_name:
+            raise TypeError("server_name can't be None")
+        if not pipe_name:
+            raise TypeError("pipe_name can't be None")
+
+        await self.start_async(server_name, pipe_name)
+
+    async def send(self, request: StreamingRequest):
+        if not request:
+            raise TypeError("request can't be None")
+
+        response = await self._request_handler.process_request(request)
+
+        if response.streams:
+            response_streams = response.streams
+            content_stream = response_streams[0]
+
+            if content_stream.content_type == PayloadTypes.response:
+                assembler = self._payload_assembler_manager.get_payload_assembler(
+                    content_stream.id
+                )
+                response = await assembler.get_stream().read_as_json()
+                return response
+
+        return None
+
 class _StreamingActivityProcessor(StreamingActivityProcessor):
     def __init__(
         self,
@@ -156,6 +196,13 @@ class _StreamingActivityProcessor(StreamingActivityProcessor):
         self._authenticate_request_result.connector_factory = (
             _StreamingConnectorFactory(self._request_handler)
         )
+
+    async def connect_named_pipe(self, pipe_name: str):
+        if not pipe_name:
+            raise TypeError("pipe_name can't be None")
+
+        named_pipe_client = _NamedPipeClient(self._request_handler)
+        await named_pipe_client.connect("", pipe_name)
 
     async def listen(self):
         await self._request_handler.listen()
